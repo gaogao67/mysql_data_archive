@@ -1,9 +1,5 @@
 ## 帮助文档
 本脚本用于循环小批量删除或归档数据。
-为防止单次操作数据量过大影响主库性能，程序会按照主键循环遍历小范围数据(参数batch_scan_rows控制)，并按照(实际影响行数*batch_sleep_seconds/batch_scan_rows)进行休眠。
-由于每次遍历数据范围不受数据条件(参数data_condition)影响，可能会导致每次循环操作数据量(满足条件数据)较少，影响数据清理或归档效率。
-
-目前仅支持相同实例内数据结转，后续会支持跨实例数据结转。
 
 ## 重点参数
 - batch_scan_rows,每次扫描主键记录的行数，而不是每次结转的行数。
@@ -11,6 +7,7 @@
 - max_query_seconds，在查找最大最小键时使用的查询最大超时时间，为防止查询超时，查询前会设置会话参数max_statement_time和max_execution_time。
 - is_dry_run，是否模拟执行。
 - is_user_confirm，执行前是否需要用户再次确认，如果模拟执行，不会弹出确认提示。
+- force_table_scan，忽略数据条件，遍历全表数据
 
 ## 使用建议
 ### 手动设置数据遍历范围
@@ -18,6 +15,9 @@
 ```SQL
 mysql_archive.set_loop_range(max_key=10000, min_key=0)
 ```
+### 强制全表扫描
+对应超大表，查询满足条件的最大键和最小键耗时较长，容易对主服务器造成影响，如不想手动设置遍历范围，也可以指定参数force_table_scan来进行全表遍历
+
 ### 暂停服务
 在程序云彩过程中,如需要停止，可以在当前scripts目录下创建stop.txt文件，当本次循环结束后会自动停止。
 
@@ -31,30 +31,28 @@ PS: 不建议直接KILL，虽然在单实例内已使用事务来保证归档数
 
 ## 删除数据示例
 ```JS
-
 def delete_demo():
-    mysql_server = MySQLServer(
-        mysql_host="172.20.117.60",
+    source_mysql_server = MySQLServer(
+        mysql_host="192.168.0.1",
         mysql_port=3306,
-        mysql_user="mysql_admin",
-        mysql_password="mysql_admin_psw",
+        mysql_user="mysql_test_admin",
+        mysql_password="mysql_test_admin.com",
         mysql_charset="utf8mb4",
         database_name="testdb",
         connect_timeout=10
     )
-    data_condition = "dt<'2020-08-20 11:22:30' and dt>='2020-08-20 10:57:10'"
-    source_database_name = "testdb"
+    data_condition = "dt<'2020-01-26 21:49:35' and dt>='2020-08-20 10:57:10'"
     source_table_name = "tb1001"
     mysql_deleter = MyDeleter(
-        mysql_server=mysql_server,
-        source_database_name=source_database_name,
+        source_mysql_server=source_mysql_server,
         source_table_name=source_table_name,
         data_condition=data_condition,
-        batch_scan_rows=1000,
+        batch_scan_rows=10000,
         batch_sleep_seconds=1,
         max_query_seconds=100,
         is_dry_run=True,
-        is_user_confirm=False
+        is_user_confirm=False,
+        force_table_scan=True
     )
     mysql_deleter.delete_data()
     mysql_deleter.is_dry_run = False
@@ -63,32 +61,74 @@ def delete_demo():
 
 ```
 
-## 归档数据实例
+## 归档数据至本地实例
 ```JS
 
-def archive_demo():
-    mysql_server = MySQLServer(
-        mysql_host="172.20.117.60",
+def archive_local_demo():
+    source_mysql_server = MySQLServer(
+        mysql_host="192.168.0.1",
         mysql_port=3306,
-        mysql_user="mysql_admin",
-        mysql_password="mysql_admin_psw",
+        mysql_user="mysql_test_admin",
+        mysql_password="mysql_test_admin.com",
         mysql_charset="utf8mb4",
         database_name="testdb",
         connect_timeout=10
     )
-    source_database_name = "testdb"
     source_table_name = "tb1001"
-    target_database_name = source_database_name + "_his"
-    target_table_name = source_table_name
-    data_condition = "dt<'2020-08-20 11:22:30' and dt>='2020-08-20 10:57:10'"
-    mysql_archive = MyArchive(
-        mysql_server=mysql_server,
-        source_database_name=source_database_name,
+    target_database_name = source_mysql_server.database_name + "_his"
+    target_table_name = source_table_name + "_his"
+    data_condition = "dt<'2020-08-20 13:22:30' and dt>='2020-08-20 10:57:10'"
+    mysql_archive = MyLocalArchive(
+        source_mysql_server=source_mysql_server,
         source_table_name=source_table_name,
         target_database_name=target_database_name,
         target_table_name=target_table_name,
         data_condition=data_condition,
-        batch_scan_rows=1000,
+        batch_scan_rows=10000,
+        batch_sleep_seconds=1,
+        max_query_seconds=100,
+        is_dry_run=True,
+        is_user_confirm=False
+    )
+    mysql_archive.archive_data()
+    mysql_archive.is_dry_run = False
+    mysql_archive.is_user_confirm = True
+    mysql_archive.archive_data()
+
+```
+
+## 归档数据至异地实例
+```JS
+
+def archive_remote_demo():
+    source_mysql_server = MySQLServer(
+        mysql_host="192.168.0.1",
+        mysql_port=3306,
+        mysql_user="mysql_test_admin",
+        mysql_password="mysql_test_admin.com",
+        mysql_charset="utf8mb4",
+        database_name="testdb",
+        connect_timeout=10
+    )
+    target_mysql_server = MySQLServer(
+        mysql_host="192.168.0.1",
+        mysql_port=3306,
+        mysql_user="mysql_test_admin",
+        mysql_password="mysql_test_admin.com",
+        mysql_charset="utf8mb4",
+        database_name="testdb_his",
+        connect_timeout=10
+    )
+    source_table_name = "tb1001"
+    target_table_name = source_table_name + "_his"
+    data_condition = "dt<'2020-08-20 13:22:30' and dt>='2020-08-20 10:57:10'"
+    mysql_archive = MyRemoteArchive(
+        source_mysql_server=source_mysql_server,
+        source_table_name=source_table_name,
+        target_mysql_server=target_mysql_server,
+        target_table_name=target_table_name,
+        data_condition=data_condition,
+        batch_scan_rows=10000,
         batch_sleep_seconds=1,
         max_query_seconds=100,
         is_dry_run=True,

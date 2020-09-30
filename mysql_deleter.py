@@ -20,112 +20,97 @@ from mysql_base import MyBase
 
 
 class MyDeleter(MyBase):
-    def __init__(self, mysql_server,
-                 source_database_name,
+    def __init__(self, source_mysql_server,
                  source_table_name,
                  data_condition,
                  batch_scan_rows,
                  batch_sleep_seconds,
                  is_dry_run=True,
                  is_user_confirm=True,
-                 max_query_seconds=0):
+                 max_query_seconds=0,
+                 force_table_scan=False):
         super(MyDeleter, self).__init__(
-            mysql_server=mysql_server,
-            source_database_name=source_database_name,
+            source_mysql_server=source_mysql_server,
             source_table_name=source_table_name,
+            target_mysql_server=None,
+            target_table_name=None,
             data_condition=data_condition,
             batch_scan_rows=batch_scan_rows,
             batch_sleep_seconds=batch_sleep_seconds,
             is_dry_run=is_dry_run,
             is_user_confirm=is_user_confirm,
-            max_query_seconds=max_query_seconds
-        )
+            max_query_seconds=max_query_seconds,
+            force_table_scan=force_table_scan)
 
-    def get_delete_script_int(self, min_key_value, max_key_value):
+    def get_transfer_scripts(self, current_key, next_key):
         delete_script = """
 DELETE FROM `{source_database_name}`.`{source_table_name}`
-WHERE `{table_primary_key}`>={min_key_value}
-AND `{table_primary_key}`<{max_key_value}
+WHERE `{table_primary_key}`>='{current_key}'
+AND `{table_primary_key}`<='{next_key}'
 AND {data_condition};
 """.format(
             source_database_name=self.source_database_name,
             source_table_name=self.source_table_name,
-            min_key_value=min_key_value,
-            max_key_value=max_key_value,
-            data_condition=self.data_condition,
-            table_primary_key=self.table_primary_key
-        )
-        return {"delete_script": delete_script}
-
-    def get_delete_script_char(self, min_key_value, max_key_value):
-        delete_script = """
-DELETE FROM `{source_database_name}`.`{source_table_name}`
-WHERE `{table_primary_key}`>='{min_key_value}'
-AND `{table_primary_key}`<'{max_key_value}'
-AND {data_condition};
-""".format(
-            source_database_name=self.source_database_name,
-            source_table_name=self.source_table_name,
-            min_key_value=pymysql.escape_string(str(min_key_value)),
-            max_key_value=pymysql.escape_string(str(max_key_value)),
+            current_key=pymysql.escape_string(str(current_key)),
+            next_key=pymysql.escape_string(str(next_key)),
             data_condition=self.data_condition,
             table_primary_key=self.table_primary_key
         )
         return {"delete_script": delete_script}
 
     def loop_delete_data(self):
-        if self.table_primary_key_type == "INT":
-            max_key, min_key = self.get_key_range_int()
-        else:
-            max_key, min_key = self.get_key_range_char()
+        max_key, min_key = self.get_loop_key_range()
         if max_key is None or min_key is None:
             PrintHelper.print_info_message("未找到满足条件的键区间")
             return
         current_key = min_key
-        while current_key <= max_key:
+        while current_key < max_key:
             if self.has_stop_file():
                 break
-            PrintHelper.print_info_message("*" * 70)
-            if self.table_primary_key_type == "INT":
-                next_key = self.get_next_key_int(min_key_value=current_key)
-                transfer_scripts = self.get_delete_script_int(
-                    min_key_value=min_key,
-                    max_key_value=next_key)
-            else:
-                next_key = self.get_next_key_char(min_key_value=current_key)
-                transfer_scripts = self.get_delete_script_char(
-                    min_key_value=min_key,
-                    max_key_value=next_key)
-            self.delete_data_by_scripts(transfer_scripts)
-            current_key = next_key
             PrintHelper.print_info_message("*" * 70)
             info = """最小值为：{0},最大值为：{1},当前处理值为：{2}""".format(
                 min_key, max_key, current_key)
             PrintHelper.print_info_message(info)
+            next_key = self.get_next_loop_key(current_key=current_key)
+            if next_key is None:
+                PrintHelper.print_info_message("未找到下一个可归档的区间，退出归档")
+                break
+            transfer_scripts = self.get_transfer_scripts(
+                current_key=current_key,
+                next_key=next_key)
+            if not self.delete_data_by_scripts(transfer_scripts):
+                PrintHelper.print_info_message("执行出现异常，退出归档！")
+                break
+            current_key = next_key
         PrintHelper.print_info_message("*" * 70)
         PrintHelper.print_info_message("执行完成")
 
     def delete_data_by_scripts(self, transfer_scripts):
-        sql_script_list = []
-        delete_script = transfer_scripts["delete_script"]
-
-        temp_script = delete_script, None
-        sql_script_list.append(temp_script)
-        sql_script = delete_script
-        tmp_script = """
+        try:
+            sql_script_list = []
+            delete_script = transfer_scripts["delete_script"]
+            temp_script = delete_script, None
+            sql_script_list.append(temp_script)
+            sql_script = delete_script
+            tmp_script = """
 USE {0};
 """.format(self.source_database_name) + sql_script + """
 COMMIT;
 SELECT SLEEP('{0}');
 ##=====================================================##
 """.format(self.batch_sleep_seconds)
-        PrintHelper.write_file(file_path=self.transfer_script_file, message=tmp_script)
-        if not self.is_dry_run:
-            total_affect_rows = self.mysql_server.mysql_exec_many(sql_script_list)
-            self.sleep_with_affect_rows(total_affect_rows)
-        else:
-            PrintHelper.print_info_message("生成迁移脚本(未执行)")
-            PrintHelper.print_info_message(sql_script)
+            PrintHelper.write_file(file_path=self.transfer_script_file, message=tmp_script)
+            if not self.is_dry_run:
+                total_affect_rows = self.source_mysql_server.mysql_exec_many(sql_script_list)
+                PrintHelper.print_info_message("本次归档操作记录{}条".format(total_affect_rows))
+                self.sleep_with_affect_rows(total_affect_rows)
+            else:
+                PrintHelper.print_info_message("生成迁移脚本(未执行)")
+                PrintHelper.print_info_message(sql_script)
+            return True
+        except Exception as ex:
+            PrintHelper.print_warning_message("在归档过程中出现异常：{}\n堆栈：{}\n".format(str(ex), traceback.format_exc()))
+            return False
 
     def user_confirm(self):
         info = """
@@ -133,7 +118,7 @@ SELECT SLEEP('{0}');
 删除数据条件为:
 DELETE FROM `{source_database_name}`.`{source_table_name}`
 WHERE {data_condition}
-""".format(mysql_host=self.mysql_server.mysql_host,
+""".format(mysql_host=self.source_mysql_server.mysql_host,
            source_database_name=self.source_database_name,
            source_table_name=self.source_table_name,
            data_condition=self.data_condition)
@@ -166,9 +151,7 @@ WHERE {data_condition}
             if str(self.data_condition).strip() == "":
                 PrintHelper.print_warning_message("迁移条件不能为空")
                 return False
-            source_columns = self.get_column_info_list(
-                database_name=self.source_database_name,
-                table_name=self.source_table_name)
+            source_columns = self.get_source_columns()
             primary_key_count = 0
             for column_item in source_columns:
                 source_column_name = column_item["Field"]
@@ -193,7 +176,7 @@ WHERE {data_condition}
                 return False
             return True
         except Exception as ex:
-            PrintHelper.print_warning_message("执行出现异常，异常为{0},{1}".format(
+            PrintHelper.print_warning_message("执行出现异常，异常:{0}\n堆栈：{1}\n".format(
                 str(ex), traceback.format_exc()))
             return False
 

@@ -65,21 +65,37 @@ class MySQLServer(object):
             )
         return conn
 
+    def set_max_execute_seconds(self, cursor, max_execute_seconds):
+        """
+        尝试设置会话级别的最大执行超时时间
+        :param cursor:
+        :param max_execute_seconds:
+        :return:
+        """
+        try:
+            cursor.execute("set max_statement_time={};".format(max_execute_seconds * 1000))
+        except:
+            pass
+        try:
+            cursor.execute("set max_execution_time={}".format(max_execute_seconds * 1000))
+        except:
+            pass
+
     def mysql_query(self, sql_script, sql_paras=None, return_dict=False, max_execute_seconds=0):
+        """
+        执行查询并返回数据
+        :param sql_script:
+        :param sql_paras:
+        :param return_dict:
+        :param max_execute_seconds:
+        :return:
+        """
         conn = None
         cursor = None
         try:
             conn = self.get_connection(return_dict=return_dict)
             cursor = conn.cursor()
-            if max_execute_seconds != 0:
-                try:
-                    cursor.execute("set max_statement_time={};".format(max_execute_seconds * 1000))
-                except:
-                    pass
-                try:
-                    cursor.execute("set max_execution_time={}".format(max_execute_seconds * 1000))
-                except:
-                    pass
+            self.set_max_execute_seconds(cursor=cursor, max_execute_seconds=max_execute_seconds)
             if sql_paras is not None:
                 cursor.execute(sql_script, sql_paras)
             else:
@@ -88,16 +104,10 @@ class MySQLServer(object):
             conn.commit()
             return exec_result
         except Exception as ex:
-            warning_message = """
-        execute script:{mysql_script}
-        execute paras:{mysql_paras},
-        execute exception:{mysql_exception}
-        execute traceback:{mysql_traceback}
-        """.format(
-                mysql_script=sql_script,
-                mysql_paras=str(sql_paras),
-                mysql_exception=str(ex),
-                mysql_traceback=traceback.format_exc()
+            conn.rollback()
+            warning_message = "执行出现异常：{}\n堆栈：{}\n语句:{}\n参数：{}".format(
+                str(ex), traceback.format_exc(),
+                sql_script, sql_paras
             )
             PrintHelper.print_warning_message(warning_message)
             raise Exception(str(ex))
@@ -118,10 +128,6 @@ class MySQLServer(object):
         conn = None
         try:
             conn = self.get_connection()
-            info_message = "在服务器{0}上执行脚本:{1}".format(
-                conn.get_host_info(),
-                sql_script)
-            PrintHelper.print_info_message(info_message)
             cursor = conn.cursor()
             if sql_paras is not None:
                 cursor.execute(sql_script, sql_paras)
@@ -129,19 +135,20 @@ class MySQLServer(object):
                 cursor.execute(sql_script)
             affect_rows = cursor.rowcount
             conn.commit()
-            cursor.close()
-            conn.close()
             return affect_rows
         except Exception as ex:
+            conn.rollback()
+            warning_message = "执行出现异常：{}\n堆栈：{}\n语句:{}\n参数：{}".format(
+                str(ex), traceback.format_exc(),
+                sql_script, sql_paras
+            )
+            PrintHelper.print_warning_message(warning_message)
+            raise Exception(str(ex))
+        finally:
             if cursor is not None:
                 cursor.close()
             if conn is not None:
-                conn.rollback()
                 conn.close()
-            warning_message = "Exception in mysql_query:{0},{1}".format(
-                str(ex), traceback.format_exc())
-            PrintHelper.print_warning_message(warning_message)
-            raise Exception(str(ex))
 
     def mysql_exec_many(self, script_list):
         """
@@ -156,27 +163,26 @@ class MySQLServer(object):
             conn = self.get_connection()
             cursor = conn.cursor()
             for sql_script, sql_param in script_list:
-                info_message = "在服务器{0}上执行脚本:{1},\r参数：{2}".format(
-                    conn.get_host_info(),
-                    sql_script, str(sql_param))
-                PrintHelper.print_info_message(info_message)
                 if sql_param is not None:
                     cursor.execute(sql_script, sql_param)
                 else:
                     cursor.execute(sql_script)
                 affect_rows = cursor.rowcount
-                PrintHelper.print_info_message("影响行数：{0}".format(affect_rows))
                 if affect_rows is not None:
                     total_affect_rows += affect_rows
             conn.commit()
             return total_affect_rows
         except Exception as ex:
+            conn.rollback()
+            warning_message = "执行出现异常：{}\n堆栈：{}\n参数：{}".format(
+                str(ex),
+                traceback.format_exc(),
+                script_list
+            )
+            PrintHelper.print_warning_message(warning_message)
+            raise Exception(str(ex))
+        finally:
             if cursor is not None:
                 cursor.close()
             if conn is not None:
-                conn.rollback()
                 conn.close()
-            warning_message = "Exception in mysql_query:{0},{1}".format(
-                str(ex), traceback.format_exc())
-            PrintHelper.print_warning_message(warning_message)
-            raise Exception(str(ex))
